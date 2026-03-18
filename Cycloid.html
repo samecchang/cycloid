@@ -1,0 +1,598 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>Rolling-Circle Locus Explorer</title>
+<style>
+:root{--bg:#0e1117;--card:#181c25;--border:#2a2f3a;--accent:#6c8cff;--accent2:#ff6c8c;--text:#d4d8e3;--muted:#7a8194;--grid:#1e2230}
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{height:100%;overflow:hidden}
+body{background:var(--bg);color:var(--text);font-family:"Inter",system-ui,sans-serif;display:flex;flex-direction:column}
+
+/* ── Top bar ── */
+.topbar{display:flex;align-items:center;gap:16px;padding:8px 16px;background:var(--card);border-bottom:1px solid var(--border);flex-shrink:0;flex-wrap:wrap}
+.topbar h1{font-size:15px;font-weight:600;white-space:nowrap}
+.ctrl{display:flex;align-items:center;gap:8px}
+.ctrl label{font-size:13px;color:var(--muted);white-space:nowrap}
+.ctrl input[type=range]{width:180px;accent-color:var(--accent)}
+.ctrl .val{font-size:13px;font-weight:600;min-width:36px;text-align:right}
+.ctrl button{padding:5px 12px;border:1px solid var(--border);border-radius:8px;background:var(--card);color:var(--text);font-size:13px;cursor:pointer;transition:background 120ms}
+.ctrl button:hover{background:var(--border)}
+.ctrl button.active{border-color:var(--accent);color:var(--accent)}
+.presets button{padding:4px 10px;border-radius:6px;font-size:12px;border:1px solid var(--border);background:var(--card);color:var(--muted);cursor:pointer}
+.presets button:hover{color:var(--text);border-color:var(--accent)}
+#info{font-size:12px;color:var(--muted);margin-left:auto;white-space:nowrap}
+
+/* ── Main area: side-by-side canvases ── */
+.main{display:flex;flex:1;min-height:0}
+.pane{position:relative;flex:1;min-width:0;min-height:0}
+.pane canvas{position:absolute;top:0;left:0;width:100%;height:100%}
+.divider{width:1px;background:var(--border);flex-shrink:0}
+
+/* ── Hint overlay ── */
+.hint{position:absolute;bottom:8px;left:50%;transform:translateX(-50%);font-size:12px;color:var(--muted);pointer-events:none;text-align:center;opacity:0.7}
+
+/* ── Accessibility live region ── */
+#sr-info{position:absolute;left:-9999px;width:1px;height:1px;overflow:hidden}
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <h1>Rolling-Circle Locus Explorer</h1>
+  <div class="ctrl">
+    <label for="sRatio">Small ⌀:</label>
+    <input type="range" id="sRatio" min="1" max="99" value="28" aria-label="Small circle diameter as percentage of large circle"/>
+    <span class="val" id="vRatio">28%</span>
+  </div>
+  <div class="ctrl presets">
+    <label>Presets:</label>
+    <button data-p="25">25%</button>
+    <button data-p="33">33%</button>
+    <button data-p="50">50%</button>
+    <button data-p="75">75%</button>
+  </div>
+  <div class="ctrl">
+    <button id="btnPause">Pause</button>
+    <button id="btnClear">Clear</button>
+    <button id="btnExport">Export PNG</button>
+  </div>
+  <span id="info">Click inside small circle to trace locus</span>
+</div>
+
+<div class="main">
+  <div class="pane" id="geoPane">
+    <canvas id="cGeo"></canvas>
+    <div class="hint" id="hintGeo">Click a point inside the small circle</div>
+  </div>
+  <div class="divider"></div>
+  <div class="pane" id="plotPane">
+    <canvas id="cPlot"></canvas>
+    <div class="hint" id="hintPlot">Locus will appear here</div>
+  </div>
+</div>
+
+<div id="sr-info" aria-live="polite" aria-atomic="true"></div>
+
+<script>
+(function(){
+'use strict';
+
+/* ================================================================
+   DOM refs
+   ================================================================ */
+var cGeo  = document.getElementById('cGeo');
+var cPlot = document.getElementById('cPlot');
+var gGeo  = cGeo.getContext('2d');
+var gPlot = cPlot.getContext('2d');
+var geoPane  = document.getElementById('geoPane');
+var plotPane = document.getElementById('plotPane');
+var sRatio   = document.getElementById('sRatio');
+var vRatio   = document.getElementById('vRatio');
+var btnPause = document.getElementById('btnPause');
+var btnClear = document.getElementById('btnClear');
+var btnExport= document.getElementById('btnExport');
+var infoEl   = document.getElementById('info');
+var srInfo   = document.getElementById('sr-info');
+var hintGeo  = document.getElementById('hintGeo');
+var hintPlot = document.getElementById('hintPlot');
+
+var dpr = window.devicePixelRatio || 1;
+var PI  = Math.PI;
+var PI2 = PI * 2;
+
+/* ================================================================
+   State
+   ================================================================ */
+var geoW, geoH, plotW, plotH;            // CSS pixel sizes
+var R;                                    // large circle radius (CSS px)
+
+/* Slider percentage → small circle radius: r = (p/100) * R */
+var pct = 28;                             // slider value 1–99
+
+/* Selected point (relative to small circle) */
+var selected = false;                     // has a point been selected?
+var relD   = 0;                           // d / r  (0–1, normalised distance)
+var phi0   = 0;                           // initial angle φ₀ in small-circle local frame
+
+/* Animation */
+var animTheta   = 0;                      // current θ for animation
+var animThetaMax= 0;                      // θ_max for closure
+var animRunning = false;
+var animPaused  = false;
+var animSpeed   = 2.5;                    // radians per second base speed
+var locusPath   = [];                     // accumulated locus points [{x,y}]
+var animDone    = false;
+
+/* ================================================================
+   Helpers
+   ================================================================ */
+function gcd(a, b){ a=Math.abs(a); b=Math.abs(b); while(b){var t=b; b=a%b; a=t;} return a; }
+
+function getR(){ return R; }
+function getr(){ return (pct / 100) * R; }
+
+/* Small circle center when tangent at bottom interior of large circle.
+   Large circle centered at (0,0).  Contact at 6 o'clock (0, R).
+   Small circle center: (0, R - r)  — but we use screen coords later. */
+function smallCenterY(){ return R - getr(); }
+
+/* Hypotrochoid point at parameter θ.
+   x(θ) = (R−r)cosθ + d·cos(kθ + φ₀)
+   y(θ) = (R−r)sinθ − d·sin(kθ + φ₀)
+   where k = (R−r)/r, d = relD * r                         */
+function locusPoint(theta, Rv, rv, dv, phi){
+  var Rr = Rv - rv;
+  var k  = Rr / rv;
+  return {
+    x: Rr * Math.cos(theta) + dv * Math.cos(k * theta + phi),
+    y: Rr * Math.sin(theta) - dv * Math.sin(k * theta + phi)
+  };
+}
+
+/* Closure angle from exact percentage ratio.
+   r/R = pct/100.  Simplify: let g = gcd(pct, 100), then
+   r/R = (pct/g) / (100/g) with coprime numerator n = pct/g.
+   The curve closes after n full orbits → θ_max = 2π·n.       */
+function closureAngle(){
+  var g = gcd(pct, 100);
+  var n = pct / g;            // irreducible numerator of r/R
+  var tMax = PI2 * n;
+  /* Safety cap at 200π (100 full turns) */
+  if(tMax > 200 * PI) tMax = 200 * PI;
+  return tMax;
+}
+
+/* ================================================================
+   Canvas sizing (HiDPI)
+   ================================================================ */
+function resizeCanvases(){
+  geoW = geoPane.clientWidth;
+  geoH = geoPane.clientHeight;
+  cGeo.width  = geoW * dpr;
+  cGeo.height = geoH * dpr;
+  cGeo.style.width  = geoW + 'px';
+  cGeo.style.height = geoH + 'px';
+
+  plotW = plotPane.clientWidth;
+  plotH = plotPane.clientHeight;
+  cPlot.width  = plotW * dpr;
+  cPlot.height = plotH * dpr;
+  cPlot.style.width  = plotW + 'px';
+  cPlot.style.height = plotH + 'px';
+
+  /* R = fit inside geo pane with padding */
+  R = Math.min(geoW, geoH) * 0.42;
+  if(R < 30) R = 30;
+}
+
+/* ================================================================
+   Drawing — Geometry canvas
+   ================================================================ */
+function drawGeo(){
+  var ctx = gGeo;
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, geoW, geoH);
+
+  var cx = geoW / 2;
+  var cy = geoH / 2;
+  var Rv = R;
+  var rv = getr();
+
+  /* ── Rolling animation: small circle center position ── */
+  var scx, scy;  // small circle center in screen coords
+  if(animRunning && !animDone){
+    /* θ is measured from +x axis.  Starting position: bottom (6 o'clock) = +π/2.
+       Small circle center traces a circle of radius (R−r) around large center.
+       We offset by π/2 so it starts at the bottom. */
+    var a = animTheta + PI / 2;
+    var Rr = Rv - rv;
+    scx = cx + Rr * Math.cos(a);
+    scy = cy + Rr * Math.sin(a);
+  } else {
+    /* Default: tangent at bottom */
+    scx = cx;
+    scy = cy + (Rv - rv);
+  }
+
+  /* ── Large circle ── */
+  ctx.beginPath();
+  ctx.arc(cx, cy, Rv, 0, PI2);
+  ctx.strokeStyle = 'rgba(108,140,255,0.35)';
+  ctx.lineWidth = 1.5;
+  ctx.stroke();
+
+  /* Subtle fill */
+  ctx.beginPath();
+  ctx.arc(cx, cy, Rv, 0, PI2);
+  ctx.fillStyle = 'rgba(108,140,255,0.04)';
+  ctx.fill();
+
+  /* ── Small circle ── */
+  ctx.beginPath();
+  ctx.arc(scx, scy, rv, 0, PI2);
+  ctx.strokeStyle = 'rgba(255,108,140,0.6)';
+  ctx.lineWidth = 1.5;
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.arc(scx, scy, rv, 0, PI2);
+  ctx.fillStyle = 'rgba(255,108,140,0.06)';
+  ctx.fill();
+
+  /* ── Contact point on large circle ── */
+  if(animRunning && !animDone){
+    var a = animTheta + PI / 2;
+    var cpx = cx + Rv * Math.cos(a);
+    var cpy = cy + Rv * Math.sin(a);
+    ctx.beginPath();
+    ctx.arc(cpx, cpy, 3, 0, PI2);
+    ctx.fillStyle = 'rgba(255,220,100,0.8)';
+    ctx.fill();
+  }
+
+  /* ── Selected point ── */
+  if(selected){
+    var d = relD * rv;
+    /* Compute the selected point's current absolute angle in the small circle */
+    var pointAngle;
+    if(animRunning && !animDone){
+      var k = (Rv - rv) / rv;
+      pointAngle = -(k * animTheta) + phi0;  // rotation of small circle
+    } else {
+      pointAngle = phi0;
+    }
+    var px = scx + d * Math.cos(pointAngle);
+    var py = scy - d * Math.sin(pointAngle);  // negate y for screen
+    ctx.beginPath();
+    ctx.arc(px, py, 4, 0, PI2);
+    ctx.fillStyle = '#ffdd44';
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(0,0,0,0.5)';
+    ctx.lineWidth = 1;
+    ctx.stroke();
+
+    /* Line from small center to point */
+    ctx.beginPath();
+    ctx.moveTo(scx, scy);
+    ctx.lineTo(px, py);
+    ctx.strokeStyle = 'rgba(255,220,68,0.3)';
+    ctx.lineWidth = 1;
+    ctx.setLineDash([3,3]);
+    ctx.stroke();
+    ctx.setLineDash([]);
+  }
+
+  /* ── Labels ── */
+  ctx.font = '12px system-ui, sans-serif';
+  ctx.fillStyle = 'rgba(108,140,255,0.6)';
+  ctx.textAlign = 'center';
+  ctx.fillText('R', cx, cy - Rv - 6);
+  ctx.fillStyle = 'rgba(255,108,140,0.7)';
+  ctx.fillText('r', scx + rv + 10, scy);
+
+  /* ── Faint locus trail on geo canvas ── */
+  if(locusPath.length > 1){
+    ctx.beginPath();
+    ctx.moveTo(cx + locusPath[0].x, cy + locusPath[0].y);
+    for(var i = 1; i < locusPath.length; i++){
+      ctx.lineTo(cx + locusPath[i].x, cy + locusPath[i].y);
+    }
+    ctx.strokeStyle = 'rgba(255,220,68,0.15)';
+    ctx.lineWidth = 1;
+    ctx.stroke();
+  }
+}
+
+/* ================================================================
+   Drawing — Plot canvas (locus)
+   ================================================================ */
+function drawPlot(){
+  var ctx = gPlot;
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, plotW, plotH);
+
+  if(locusPath.length < 2){
+    return;
+  }
+
+  /* Compute bounding box of locus */
+  var minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+  for(var i = 0; i < locusPath.length; i++){
+    var p = locusPath[i];
+    if(p.x < minX) minX = p.x;
+    if(p.x > maxX) maxX = p.x;
+    if(p.y < minY) minY = p.y;
+    if(p.y > maxY) maxY = p.y;
+  }
+  var rangeX = maxX - minX || 1;
+  var rangeY = maxY - minY || 1;
+  var pad = 30;
+  var availW = plotW - pad * 2;
+  var availH = plotH - pad * 2;
+  var scale = Math.min(availW / rangeX, availH / rangeY);
+  var offX = pad + (availW - rangeX * scale) / 2 - minX * scale;
+  var offY = pad + (availH - rangeY * scale) / 2 - minY * scale;
+
+  /* ── Grid / axes ── */
+  var cxPlot = offX;  // origin x in plot px
+  var cyPlot = offY;  // origin y in plot px
+  ctx.strokeStyle = 'rgba(108,140,255,0.12)';
+  ctx.lineWidth = 0.5;
+  /* Horizontal axis */
+  ctx.beginPath();
+  ctx.moveTo(pad, cyPlot);
+  ctx.lineTo(plotW - pad, cyPlot);
+  ctx.stroke();
+  /* Vertical axis */
+  ctx.beginPath();
+  ctx.moveTo(cxPlot, pad);
+  ctx.lineTo(cxPlot, plotH - pad);
+  ctx.stroke();
+
+  /* ── Locus curve ── */
+  ctx.beginPath();
+  ctx.moveTo(offX + locusPath[0].x * scale, offY + locusPath[0].y * scale);
+  for(var j = 1; j < locusPath.length; j++){
+    ctx.lineTo(offX + locusPath[j].x * scale, offY + locusPath[j].y * scale);
+  }
+
+  /* Gradient stroke for visual interest */
+  var grad = ctx.createLinearGradient(pad, pad, plotW - pad, plotH - pad);
+  grad.addColorStop(0, '#6c8cff');
+  grad.addColorStop(0.5, '#ff6c8c');
+  grad.addColorStop(1, '#ffdd44');
+  ctx.strokeStyle = grad;
+  ctx.lineWidth = 1.5;
+  ctx.lineJoin = 'round';
+  ctx.stroke();
+
+  /* ── Progress text ── */
+  if(animRunning && !animDone){
+    var pctDone = Math.min(100, (animTheta / animThetaMax) * 100);
+    ctx.font = '12px system-ui, sans-serif';
+    ctx.fillStyle = 'var(--muted)';
+    ctx.fillStyle = '#7a8194';
+    ctx.textAlign = 'right';
+    ctx.fillText(pctDone.toFixed(1) + '% drawn', plotW - 10, plotH - 8);
+  }
+}
+
+/* ================================================================
+   Animation loop
+   ================================================================ */
+var lastTime = 0;
+
+function frame(now){
+  requestAnimationFrame(frame);
+  if(!lastTime) lastTime = now;
+  var dt = Math.min((now - lastTime) / 1000, 0.05);
+  lastTime = now;
+
+  if(animRunning && !animPaused && !animDone){
+    /* Adaptive speed: faster for longer curves */
+    var speed = animSpeed * (1 + animThetaMax / (PI2 * 4));
+    var step = speed * dt;
+    var prevTheta = animTheta;
+    animTheta += step;
+
+    if(animTheta >= animThetaMax){
+      animTheta = animThetaMax;
+      animDone = true;
+    }
+
+    /* Sample points in this step */
+    var Rv = R;
+    var rv = getr();
+    var dv = relD * rv;
+    /* Fine sampling: ~0.005 rad per point */
+    var dTheta = 0.005;
+    var t = prevTheta;
+    while(t < animTheta){
+      t += dTheta;
+      if(t > animTheta) t = animTheta;
+      /* Note: y on screen is flipped, so we negate the y from the math formula
+         to convert to screen-down coords for both canvases */
+      var pt = locusPoint(t, Rv, rv, dv, phi0);
+      locusPath.push({ x: pt.x, y: pt.y });
+    }
+  }
+
+  drawGeo();
+  drawPlot();
+}
+
+/* ================================================================
+   Interaction — Slider
+   ================================================================ */
+function updateSlider(){
+  pct = +sRatio.value;
+  vRatio.textContent = pct + '%';
+  srInfo.textContent = 'Small circle diameter: ' + pct + '% of large circle.';
+
+  /* If a point is selected and animation is active, restart with new ratio */
+  if(selected){
+    restartAnimation();
+  }
+}
+sRatio.addEventListener('input', updateSlider);
+
+/* Presets */
+var presetBtns = document.querySelectorAll('.presets button');
+for(var i = 0; i < presetBtns.length; i++){
+  presetBtns[i].addEventListener('click', (function(btn){
+    return function(){
+      sRatio.value = btn.getAttribute('data-p');
+      updateSlider();
+    };
+  })(presetBtns[i]));
+}
+
+/* ================================================================
+   Interaction — Click to select point
+   ================================================================ */
+cGeo.addEventListener('click', function(e){
+  var rect = cGeo.getBoundingClientRect();
+  var mx = e.clientX - rect.left;
+  var my = e.clientY - rect.top;
+
+  var cx = geoW / 2;
+  var cy = geoH / 2;
+  var rv = getr();
+
+  /* Small circle center (default resting position: tangent at bottom) */
+  var scx = cx;
+  var scy = cy + (R - rv);
+
+  var dx = mx - scx;
+  var dy = my - scy;
+  var dist = Math.sqrt(dx * dx + dy * dy);
+
+  if(dist > rv){
+    /* Clicked outside small circle — flash hint */
+    hintGeo.style.opacity = '1';
+    setTimeout(function(){ hintGeo.style.opacity = '0.7'; }, 800);
+    return;
+  }
+
+  /* Compute d (distance from small circle center) and φ₀ */
+  relD = dist / rv;  // normalised 0–1
+  if(dist < 0.5){
+    phi0 = 0;
+  } else {
+    /* atan2 with screen-y flipped: angle from +x axis, CCW positive */
+    phi0 = Math.atan2(-dy, dx);
+  }
+
+  selected = true;
+  hintGeo.style.display = 'none';
+  hintPlot.style.display = 'none';
+
+  var dPx = (relD * rv).toFixed(1);
+  var phiDeg = (phi0 * 180 / PI).toFixed(1);
+  infoEl.textContent = 'Point: d=' + dPx + 'px (' + (relD*100).toFixed(0) + '% of r), φ₀=' + phiDeg + '°';
+  srInfo.textContent = 'Selected point at ' + (relD*100).toFixed(0) + '% of radius, angle ' + phiDeg + ' degrees.';
+
+  restartAnimation();
+});
+
+/* Cursor style when hovering small circle */
+cGeo.addEventListener('mousemove', function(e){
+  var rect = cGeo.getBoundingClientRect();
+  var mx = e.clientX - rect.left;
+  var my = e.clientY - rect.top;
+  var cx = geoW / 2;
+  var cy = geoH / 2;
+  var rv = getr();
+  var scx = cx;
+  var scy = cy + (R - rv);
+  var dx = mx - scx;
+  var dy = my - scy;
+  cGeo.style.cursor = (Math.sqrt(dx*dx+dy*dy) <= rv) ? 'crosshair' : 'default';
+});
+
+/* ================================================================
+   Animation control
+   ================================================================ */
+function restartAnimation(){
+  locusPath = [];
+  animTheta = 0;
+  animThetaMax = closureAngle();
+  animRunning = true;
+  animPaused = false;
+  animDone = false;
+  btnPause.textContent = 'Pause';
+  btnPause.classList.remove('active');
+}
+
+btnPause.addEventListener('click', function(){
+  if(!animRunning) return;
+  animPaused = !animPaused;
+  btnPause.textContent = animPaused ? 'Resume' : 'Pause';
+  btnPause.classList.toggle('active', animPaused);
+});
+
+btnClear.addEventListener('click', function(){
+  locusPath = [];
+  animRunning = false;
+  animPaused = false;
+  animDone = false;
+  selected = false;
+  animTheta = 0;
+  btnPause.textContent = 'Pause';
+  btnPause.classList.remove('active');
+  infoEl.textContent = 'Click inside small circle to trace locus';
+  hintGeo.style.display = '';
+  hintPlot.style.display = '';
+  hintGeo.style.opacity = '0.7';
+});
+
+btnExport.addEventListener('click', function(){
+  if(locusPath.length < 2) return;
+  var link = document.createElement('a');
+  link.download = 'hypotrochoid.png';
+  link.href = cPlot.toDataURL('image/png');
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
+});
+
+/* ================================================================
+   Resize
+   ================================================================ */
+function onResize(){
+  dpr = window.devicePixelRatio || 1;
+  resizeCanvases();
+  /* If animation was done or running, rebuild the locus with new R */
+  if(selected){
+    /* Recompute entire locus statically up to current theta */
+    var savedTheta = animTheta;
+    var savedDone  = animDone;
+    locusPath = [];
+    var Rv = R;
+    var rv = getr();
+    var dv = relD * rv;
+    animThetaMax = closureAngle();
+    if(savedDone) savedTheta = animThetaMax;
+    var dTheta = 0.005;
+    for(var t = 0; t <= savedTheta; t += dTheta){
+      if(t > savedTheta) t = savedTheta;
+      var pt = locusPoint(t, Rv, rv, dv, phi0);
+      locusPath.push({ x: pt.x, y: pt.y });
+    }
+    animTheta = savedTheta;
+  }
+}
+window.addEventListener('resize', onResize);
+
+/* ================================================================
+   Init
+   ================================================================ */
+resizeCanvases();
+updateSlider();
+requestAnimationFrame(frame);
+
+})();
+</script>
+</body>
+</html>

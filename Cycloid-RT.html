@@ -1,0 +1,408 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>內滾圓軌跡（Hypotrochoid）— 大圓內含小圓與百分比拖曳</title>
+  <style>
+    :root {
+      --bg: #0e0f12;
+      --panel: #16181d;
+      --text: #e6e8ef;
+      --muted: #9aa3b2;
+      --accent: #5bb2ff;
+      --accent-2: #8b5cf6;
+      --grid: #22252c;
+      --stroke: #e2e8f0;
+      --point: #ff6b6b;
+    }
+    * { box-sizing: border-box; }
+    html, body { height: 100%; }
+    body {
+      margin: 0;
+      color: var(--text);
+      background: radial-gradient(1200px 800px at 10% -10%, #18202b 0%, var(--bg) 60%), var(--bg);
+      font-family: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, "Apple Color Emoji", "Segoe UI Emoji";
+    }
+    .app {
+      display: grid;
+      grid-template-columns: 1fr 1fr 280px;
+      grid-template-rows: 1fr;
+      gap: 12px;
+      padding: 12px;
+      height: 100vh;
+      min-height: 0;
+    }
+    @media (max-width: 960px) {
+      .app { grid-template-columns: 1fr 1fr; }
+      .app > aside { grid-column: 1 / -1; }
+    }
+    @media (max-width: 600px) {
+      .app { grid-template-columns: 1fr; height: auto; }
+    }
+    .card {
+      background: linear-gradient(180deg, #151820, #0f1116);
+      border: 1px solid #23262f;
+      border-radius: 14px;
+      box-shadow: 0 10px 30px rgba(0,0,0,0.35);
+      overflow: hidden;
+    }
+    .panel {
+      padding: 14px 16px;
+      border-bottom: 1px solid #23262f;
+    }
+    .title { font-weight: 700; letter-spacing: .2px; }
+    .muted { color: var(--muted); font-size: 14px; }
+
+    .main-wrap { padding: 12px; flex: 1; min-height: 0; display: flex; flex-direction: column; }
+    .canvas-wrap { position: relative; flex: 1; min-height: 0; }
+    canvas { width: 100%; height: 100%; display: block; background: transparent; }
+    .card { display: flex; flex-direction: column; min-height: 0; }
+
+    .controls { display: grid; gap: 10px; padding: 14px 16px; }
+    .row { display: grid; gap: 8px; }
+    .label { font-size: 14px; color: var(--muted); }
+    input[type="range"] { width: 100%; }
+
+    .plot-wrap { padding: 12px; flex: 1; min-height: 0; display: flex; flex-direction: column; }
+
+    .hint { color: var(--muted); font-size: 13px; line-height: 1.45; }
+    .badge { display: inline-block; padding: 2px 8px; border-radius: 999px; background: #1e2230; color: var(--accent); border: 1px solid #2a3142; margin-left: 6px; font-size: 12px; }
+
+    .footer { text-align: center; color: var(--muted); font-size: 12px; padding: 10px 8px; }
+  </style>
+</head>
+<body>
+  <div class="app">
+    <section class="card" aria-label="幾何視圖">
+      <div class="panel">
+        <div class="title">大圓 + 小圓（小圓貼底）</div>
+        <div class="hint">滑桿控制 <strong>小圓直徑</strong> 佔 <strong>大圓直徑</strong> 的百分比。
+          <span class="badge" id="percentBadge">--%</span>
+        </div>
+      </div>
+      <div class="main-wrap">
+        <div class="canvas-wrap">
+          <canvas id="mainCanvas" aria-label="主繪圖畫布：大圓與小圓"></canvas>
+        </div>
+      </div>
+    </section>
+
+    <section class="card" aria-label="軌跡視圖">
+      <div class="panel">
+        <div class="title">內滾圓軌跡（Hypotrochoid）</div>
+        <div class="hint">在小圓內<strong>點一下</strong>選定點位。拖動滑桿會即時重繪軌跡。</div>
+      </div>
+      <div class="plot-wrap">
+        <div class="canvas-wrap">
+          <canvas id="plotCanvas" aria-label="軌跡繪圖畫布"></canvas>
+        </div>
+        <div class="footer" id="metaText">尚未選點</div>
+      </div>
+    </section>
+
+    <aside class="card" aria-label="控制面板" style="overflow-y:auto">
+      <div class="panel"><div class="title">控制面板</div></div>
+      <div class="controls">
+        <div class="row">
+          <label for="diameterPct" class="label">小圓直徑（相對大圓）<span id="pctText">50%</span></label>
+          <input id="diameterPct" type="range" min="1" max="99" step="1" value="50" aria-label="小圓直徑百分比 1 至 99" />
+        </div>
+        <div class="row">
+          <div class="label">操作說明</div>
+          <div class="hint">
+            1) 拖動滑桿調整比例。<br/>
+            2) 在 <strong>小圓內</strong> 點一下選點。<br/>
+            3) 下方即時繪出該點隨小圓在大圓內滾動時的軌跡。<br/>
+            4) 再次點選可更新點位。
+          </div>
+        </div>
+      </div>
+    </aside>
+  </div>
+
+  <script>
+  (function(){
+    // ------ Utilities ------
+    const dpr = Math.max(1, Math.min(3, window.devicePixelRatio || 1));
+
+    function setupHiDPICanvas(canvas, cssWidth, cssHeight) {
+      const cw = Math.max(10, Math.floor(cssWidth));
+      const ch = Math.max(10, Math.floor(cssHeight));
+      // Set CSS size via style to preserve layout, and device pixels via width/height
+      canvas.style.width = cw + 'px';
+      canvas.style.height = ch + 'px';
+      canvas.width = Math.round(cw * dpr);
+      canvas.height = Math.round(ch * dpr);
+      const ctx = canvas.getContext('2d');
+      ctx.setTransform(1,0,0,1,0,0);
+      ctx.scale(dpr, dpr);
+      ctx.imageSmoothingEnabled = true;
+      ctx.imageSmoothingQuality = 'high';
+      return ctx;
+    }
+
+    function getCSSPixelSize(el) {
+      const rect = el.getBoundingClientRect();
+      return { w: rect.width, h: rect.height };
+    }
+
+    function gcd(a, b) {
+      a = Math.abs(a); b = Math.abs(b);
+      while (b) { const t = b; b = a % b; a = t; }
+      return a || 1;
+    }
+
+    // ------ State ------
+    const mainCanvas = document.getElementById('mainCanvas');
+    const plotCanvas = document.getElementById('plotCanvas');
+    const slider = document.getElementById('diameterPct');
+    const pctText = document.getElementById('pctText');
+    const percentBadge = document.getElementById('percentBadge');
+    const metaText = document.getElementById('metaText');
+
+    let mainCtx, plotCtx;
+    let mainW = 0, mainH = 0, plotW = 0, plotH = 0;
+
+    // Geometry (in canvas CSS pixels):
+    let R = 100; // 大圓半徑
+    let r = 50;  // 小圓半徑
+    let CX = 0, CY = 0; // 大圓中心
+    let sx = 0, sy = 0; // 小圓中心
+
+    // Selected point (relative to 小圓中心): normalized radius and initial angle
+    // dRel in [0,1], phi0 in radians; null means not selected yet
+    let dRel = null; // d / r
+    let phi0 = null; // 角度
+
+    // ------ Layout / Resize ------
+    function resizeAll() {
+      // Main canvas size from its container
+      const mainSize = getCSSPixelSize(mainCanvas.parentElement);
+      mainCtx = setupHiDPICanvas(mainCanvas, mainSize.w, mainSize.h);
+      mainW = mainSize.w; mainH = mainSize.h;
+
+      // Plot canvas size from its container
+      const plotSize = getCSSPixelSize(plotCanvas.parentElement);
+      plotCtx = setupHiDPICanvas(plotCanvas, plotSize.w, plotSize.h);
+      plotW = plotSize.w; plotH = plotSize.h;
+
+      // Define R based on available main canvas area (leave margins)
+      const m = Math.min(mainW, mainH);
+      R = Math.max(30, Math.floor(0.42 * m));
+      updateSmallRadiusFromSlider();
+      redrawAll();
+    }
+
+    function updateSmallRadiusFromSlider() {
+      const p = parseInt(slider.value, 10);
+      pctText.textContent = p + '%';
+      percentBadge.textContent = p + '%';
+      r = (p / 100) * R; // 直徑百分比 => 半徑同百分比
+      // Centers: 大圓置中，小圓貼底（6 點鐘方向）
+      CX = mainW / 2;
+      CY = mainH / 2;
+      sx = CX;
+      sy = CY + (R - r);
+    }
+
+    // ------ Drawing: Main Canvas ------
+    function drawMain() {
+      const ctx = mainCtx;
+      ctx.clearRect(0, 0, mainW, mainH);
+
+      // Background grid (subtle)
+      ctx.save();
+      ctx.lineWidth = 1;
+      ctx.strokeStyle = '#1f2330';
+      const gridStep = 24;
+      for (let x = ((CX % gridStep) + gridStep) % gridStep; x < mainW; x += gridStep) {
+        ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, mainH); ctx.stroke();
+      }
+      for (let y = ((CY % gridStep) + gridStep) % gridStep; y < mainH; y += gridStep) {
+        ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(mainW, y); ctx.stroke();
+      }
+      ctx.restore();
+
+      // Draw big circle
+      ctx.save();
+      ctx.lineWidth = 2;
+      ctx.strokeStyle = '#e2e8f0';
+      ctx.beginPath();
+      ctx.arc(CX, CY, R, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.restore();
+
+      // Draw small circle (tangent at bottom)
+      ctx.save();
+      ctx.lineWidth = 2;
+      ctx.strokeStyle = '#8b5cf6';
+      ctx.fillStyle = 'rgba(139, 92, 246, 0.08)';
+      ctx.beginPath();
+      ctx.arc(sx, sy, r, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.stroke();
+
+      // Contact point marker (optional)
+      ctx.fillStyle = '#5bb2ff';
+      ctx.beginPath();
+      ctx.arc(CX, CY + R, 3, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.restore();
+
+      // Show selected point if any
+      if (dRel !== null && phi0 !== null) {
+        const d = dRel * r;
+        const px = sx + d * Math.cos(phi0);
+        const py = sy - d * Math.sin(phi0); // 注意：canvas y 向下，數學 y 向上
+        ctx.save();
+        ctx.fillStyle = getComputedStyle(document.documentElement).getPropertyValue('--point').trim() || '#ff6b6b';
+        ctx.strokeStyle = '#ffffff';
+        ctx.lineWidth = 1.25;
+        ctx.beginPath();
+        ctx.arc(px, py, 4, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.stroke();
+        ctx.restore();
+      }
+    }
+
+    function redrawAll() {
+      drawMain();
+      if (dRel !== null && phi0 !== null) {
+        drawLocus();
+      } else {
+        clearPlot();
+      }
+    }
+
+    // ------ Plot Locus (Hypotrochoid) on bottom canvas ------
+    function clearPlot() {
+      plotCtx.clearRect(0, 0, plotW, plotH);
+      metaText.textContent = '尚未選點';
+    }
+
+    function drawAxes(bounds) {
+      const ctx = plotCtx;
+      ctx.save();
+      ctx.lineWidth = 1;
+      ctx.strokeStyle = '#232733';
+      // Border frame
+      ctx.strokeRect(0.5, 0.5, plotW - 1, plotH - 1);
+      // Optional axes through center of plot area
+      if (bounds) {
+        const { xMin, xMax, yMin, yMax, pad, s } = bounds;
+        const cxp = pad + (-xMin) * s; // x=0 pixel
+        const cyp = pad + (yMax) * s;  // y=0 pixel (since y up)
+        ctx.beginPath(); ctx.moveTo(0, cyp); ctx.lineTo(plotW, cyp); ctx.stroke();
+        ctx.beginPath(); ctx.moveTo(cxp, 0); ctx.lineTo(cxp, plotH); ctx.stroke();
+      }
+      ctx.restore();
+    }
+
+    function drawLocus() {
+      const ctx = plotCtx;
+      ctx.clearRect(0, 0, plotW, plotH);
+
+      const p = parseInt(slider.value, 10); // 直徑百分比
+      // Closure 角度：θ_max = 2π * p / gcd(p, 100 - p)
+      const g = gcd(p, 100 - p);
+      const thetaMax = 2 * Math.PI * (p / g);
+
+      // Params
+      const d = dRel * r;           // 選點距小圓中心距離（像素）
+      const k = (R - r) / r;        // 旋轉比
+
+      // 先取樣到數學座標，求包圍盒
+      // 採樣點數：控制在 1200~8000 之間
+      const targetPoints = Math.min(8000, Math.max(1200, Math.ceil(thetaMax / 0.006)));
+      const dTheta = thetaMax / targetPoints;
+
+      const xs = new Float64Array(targetPoints + 1);
+      const ys = new Float64Array(targetPoints + 1);
+
+      for (let i = 0; i <= targetPoints; i++) {
+        const th = i * dTheta;
+        const x = (R - r) * Math.cos(th) + d * Math.cos(k * th + phi0);
+        const y = (R - r) * Math.sin(th) - d * Math.sin(k * th + phi0); // y 向上正
+        xs[i] = x; ys[i] = y;
+      }
+
+      // Bounding box
+      let xMin = +Infinity, xMax = -Infinity, yMin = +Infinity, yMax = -Infinity;
+      for (let i = 0; i < xs.length; i++) {
+        const x = xs[i], y = ys[i];
+        if (x < xMin) xMin = x; if (x > xMax) xMax = x;
+        if (y < yMin) yMin = y; if (y > yMax) yMax = y;
+      }
+      // Add small padding
+      const padPx = 16; // CSS px padding
+      const wInner = Math.max(10, plotW - padPx * 2);
+      const hInner = Math.max(10, plotH - padPx * 2);
+      const sx = xMax - xMin || 1; const sy = yMax - yMin || 1;
+      const s = Math.min(wInner / sx, hInner / sy);
+
+      // Draw frame/axes
+      drawAxes({ xMin, xMax, yMin, yMax, pad: padPx, s });
+
+      // Draw polyline
+      ctx.save();
+      ctx.lineWidth = 1.6;
+      const grad = ctx.createLinearGradient(0, 0, plotW, 0);
+      grad.addColorStop(0.0, '#5bb2ff');
+      grad.addColorStop(0.5, '#22d3ee');
+      grad.addColorStop(1.0, '#8b5cf6');
+      ctx.strokeStyle = grad;
+      ctx.beginPath();
+      for (let i = 0; i < xs.length; i++) {
+        const x = padPx + (xs[i] - xMin) * s;
+        const y = padPx + (yMax - ys[i]) * s; // y 上為正 => 畫布需顛倒
+        if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+      }
+      ctx.stroke();
+      ctx.restore();
+
+      // Meta text
+      const cusps = (100 / g) - ( (100 - p) / g ); // p/g − (100−p)/g not correct for cusps; compute using R/r = 100/p
+      const ratioStr = `${(R).toFixed(0)}:${(r).toFixed(0)} ≈ ${ (100).toFixed(0) }:${ p }`;
+      metaText.textContent = `p = ${p}% | θ_max = ${(thetaMax).toFixed(2)} rad | 取樣點數 ${targetPoints} | 比例 R:r ≈ ${ratioStr}`;
+    }
+
+    // ------ Interaction ------
+    slider.addEventListener('input', () => {
+      updateSmallRadiusFromSlider();
+      // Keep same relative point if selected
+      redrawAll();
+    });
+
+    mainCanvas.addEventListener('mousemove', (ev) => {
+      const rect = mainCanvas.getBoundingClientRect();
+      const x = ev.clientX - rect.left;
+      const y = ev.clientY - rect.top;
+      const dx = x - sx, dy = y - sy;
+      const inside = (dx*dx + dy*dy) <= (r*r + 1e-6);
+      mainCanvas.style.cursor = inside ? 'crosshair' : 'default';
+    });
+
+    mainCanvas.addEventListener('click', (ev) => {
+      const rect = mainCanvas.getBoundingClientRect();
+      const x = ev.clientX - rect.left;
+      const y = ev.clientY - rect.top;
+      const dx = x - sx; const dy = y - sy;
+      const dist = Math.hypot(dx, dy);
+      if (dist <= r + 1e-6) {
+        // Convert to mathematical coordinates for angle: y up
+        const dyUp = -dy;
+        dRel = Math.min(1, Math.max(0, dist / r));
+        phi0 = Math.atan2(dyUp, dx); // [-π, π]
+        redrawAll();
+      }
+    });
+
+    // ------ Init ------
+    window.addEventListener('resize', () => resizeAll());
+    resizeAll();
+  })();
+  </script>
+</body>
+</html>
